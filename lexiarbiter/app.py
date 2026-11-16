@@ -1545,18 +1545,34 @@ class MainWindow(QMainWindow):
             return
         name = self.doc.concepts[concept_id]
         if action == "delete":
-            answer = QMessageBox.question(self, "刪除概念", f"確定刪除「{name}」？相關術語會保留，但取消概念連結。")
+            linked_annotations = [
+                ann for ann in self.doc.annotations
+                if ann.concept_id == concept_id
+            ]
+            answer = QMessageBox.question(
+                self,
+                "刪除概念",
+                f"確定刪除「{name}」？\n\n"
+                f"本文中連結此概念的 {len(linked_annotations)} 筆術語標記也會一併刪除。",
+            )
             if answer != QMessageBox.Yes:
                 return
+
+            removed_ids = {ann.id for ann in linked_annotations}
+            self.doc.annotations = [
+                ann for ann in self.doc.annotations
+                if ann.id not in removed_ids
+            ]
             for ann in self.doc.annotations:
-                if ann.concept_id == concept_id:
-                    ann.concept_id = None
                 ann.set_broader_concept_ids([
                     parent_id
                     for parent_id in ann.get_broader_concept_ids()
                     if parent_id != concept_id
                 ])
             del self.doc.concepts[concept_id]
+            if self._active_annotation_id in removed_ids:
+                self._active_annotation_id = None
+                self.editor.set_active_annotation(None)
             self.doc.dirty = True
             self.concept_panel.refresh(self.doc)
             self.editor.refresh_highlights()
