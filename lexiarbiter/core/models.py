@@ -25,6 +25,7 @@ class Annotation:
     explanation_start: Optional[int] = None
     explanation_end: Optional[int] = None
     broader_concept_id: Optional[str] = None
+    explanation_text: str = ""
 
     def overlaps(self, other: "Annotation") -> bool:
         return not (self.end <= other.start or other.end <= self.start)
@@ -46,7 +47,8 @@ class Annotation:
             concept_id=data.get("concept_id"),  # 讀取概念 ID
             explanation_start=data.get("explanation_start"),
             explanation_end=data.get("explanation_end"),
-            broader_concept_id=data.get("broader_concept_id")
+            broader_concept_id=data.get("broader_concept_id"),
+            explanation_text=data.get("explanation_text", ""),
         )
 
 

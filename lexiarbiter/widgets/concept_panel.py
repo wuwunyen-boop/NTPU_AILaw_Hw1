@@ -3,7 +3,7 @@ import uuid
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QListWidget,
-    QListWidgetItem, QTreeWidget, QTreeWidgetItem,
+    QListWidgetItem, QTreeWidget, QTreeWidgetItem, QMenu,
     QAbstractItemView, QLineEdit, QPushButton,
     QLabel, QWidget, QMessageBox
 )
@@ -261,6 +261,7 @@ class ConceptSelectionDialog(QDialog):
 class ConceptSidebar(QWidget):
     """側邊欄：顯示當前文件所有的概念池"""
     concept_clicked = Signal(str)
+    concept_action = Signal(str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -272,7 +273,10 @@ class ConceptSidebar(QWidget):
         f.setBold(True)
         title.setFont(f)
         
-        self.list_widget = QListWidget()
+        self.list_widget = QTreeWidget()
+        self.list_widget.setHeaderHidden(True)
+        self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list_widget.customContextMenuRequested.connect(self._show_menu)
         self.list_widget.itemClicked.connect(
             self._on_item_clicked
         )
@@ -284,16 +288,40 @@ class ConceptSidebar(QWidget):
         self.list_widget.clear()
         if not doc or not hasattr(doc, 'concepts'):
             return
-        for cid, name in doc.concepts.items():
-            item = QListWidgetItem(f"● {name}")
-            item.setData(Qt.UserRole, cid)
-            self.list_widget.addItem(item)
-
-        # 讓側邊欄的概念清單也依照筆畫/字母自動排序
-        self.list_widget.sortItems(Qt.AscendingOrder)
+        parent_by_child = {}
+        for ann in doc.annotations:
+            if ann.concept_id in doc.concepts and ann.broader_concept_id in doc.concepts and ann.concept_id != ann.broader_concept_id:
+                parent_by_child.setdefault(ann.concept_id, ann.broader_concept_id)
+        for child in list(parent_by_child):
+            seen, current = {child}, parent_by_child.get(child)
+            while current in parent_by_child:
+                if current in seen:
+                    parent_by_child.pop(child, None)
+                    break
+                seen.add(current); current = parent_by_child[current]
+        by_parent = {}
+        for child, parent in parent_by_child.items(): by_parent.setdefault(parent, []).append(child)
+        def add(cid, parent_item=None):
+            item = QTreeWidgetItem([doc.concepts[cid]])
+            item.setData(0, Qt.UserRole, cid)
+            (parent_item.addChild(item) if parent_item else self.list_widget.addTopLevelItem(item))
+            for child in sorted(by_parent.get(cid, []), key=lambda x: doc.concepts[x]): add(child, item)
+        roots = [cid for cid in doc.concepts if cid not in parent_by_child]
+        for cid in sorted(roots, key=lambda x: doc.concepts[x]): add(cid)
 
     def _on_item_clicked(self, item: QListWidgetItem):
-        concept_id = item.data(Qt.UserRole)
+        concept_id = item.data(0, Qt.UserRole)
 
         if concept_id:
             self.concept_clicked.emit(concept_id)
+
+    def _show_menu(self, pos):
+        item = self.list_widget.itemAt(pos)
+        if item is None: return
+        cid = item.data(0, Qt.UserRole)
+        menu = QMenu(self)
+        edit = menu.addAction("編輯概念…")
+        delete = menu.addAction("刪除概念")
+        chosen = menu.exec(self.list_widget.viewport().mapToGlobal(pos))
+        if chosen is edit: self.concept_action.emit(cid, "edit")
+        elif chosen is delete: self.concept_action.emit(cid, "delete")

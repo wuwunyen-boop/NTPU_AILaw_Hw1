@@ -1,0 +1,72 @@
+{
+  "id": "judgment_reasoning",
+  "name": "判決理由與主張標註",
+  "description": "依 261012_annotation 標註設定區分法院說理、雙方主張及引述。",
+  "groups": [
+    {
+      "id": "legal_function",
+      "name": "法律論述功能",
+      "role": "primary",
+      "labels": [
+        {
+          "id": "fact_evidence",
+          "name": "🟩 法院說理：事實及證據",
+          "tag": "FactEvidence",
+          "color": "#4f5a5f"
+        },
+        {
+          "id": "fact_evidence_quote",
+          "name": "🟩 法院說理：事實及證據__引述",
+          "tag": "FactEvidenceQuote",
+          "color": "#4f5a5f"
+        },
+        {
+          "id": "law_citation",
+          "name": "🟦 法院說理：引用法規或裁判",
+          "tag": "LawCitation",
+          "color": "#29B6F6"
+        },
+        {
+          "id": "court_reasoning",
+          "name": "🟪 法院說理：心證與判斷",
+          "tag": "CourtReasoning",
+          "color": "#01579B"
+        },
+        {
+          "id": "plaintiff_claim",
+          "name": "🟥 原告或檢察官主張",
+          "tag": "PlaintiffClaim",
+          "color": "#EF5350"
+        },
+        {
+          "id": "plaintiff_quote",
+          "name": "🟥 原告或檢察官主張__引述",
+          "tag": "PlaintiffQuote",
+          "color": "#EF5350"
+        },
+        {
+          "id": "defendant_claim",
+          "name": "🟨 被告主張",
+          "tag": "DefendantClaim",
+          "color": "#FFC107"
+        },
+        {
+          "id": "defendant_quote",
+          "name": "🟨 被告主張__引述",
+          "tag": "DefendantQuote",
+          "color": "#FFC107"
+        }
+      ]
+    }
+  ],
+  "export": {
+    "format": "p_tag",
+    "tag_order": [
+      "legal_function"
+    ],
+    "tag_separator": ",",
+    "wrapper_open": "<P>",
+    "wrapper_close": "</P>",
+    "field_separator": "|"
+  }
+}

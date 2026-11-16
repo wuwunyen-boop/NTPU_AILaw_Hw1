@@ -19,6 +19,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMenu,
     QMessageBox, QPushButton, QSplitter, QStatusBar, QToolBar, QVBoxLayout,
+    QInputDialog,
     QWidget, QWidgetAction,
 )
 
@@ -113,6 +114,7 @@ class MainWindow(QMainWindow):
         self.concept_panel = ConceptSidebar() # 新增概念側欄
         self.concept_panel.setVisible(self.mode.id == "term_definition") #根據初始的標註模式，決定是否顯示概念側欄
         self.concept_panel.concept_clicked.connect(self._on_concept_clicked)
+        self.concept_panel.concept_action.connect(self._on_concept_action)
 
         # 右側垂直切分 (上方檔案、下方概念)
         right_splitter = QSplitter(Qt.Vertical)
@@ -567,8 +569,8 @@ class MainWindow(QMainWindow):
                 end=match_end,
                 labels={group_id: label_id},
                 concept_id=source_ann.concept_id,
-                explanation_start=match_start,
-                explanation_end=match_end,
+                # 自動複製的相同術語只建立標註與概念連結；解釋只屬於
+                # 使用者目前選取並編輯的那一筆，不將詞面文字假裝成解釋。
                 broader_concept_id=source_ann.broader_concept_id,
             )
 
@@ -591,13 +593,6 @@ class MainWindow(QMainWindow):
         if self.mode.id != "term_definition":
             self.status.showMessage(
                 "只有「術語與解釋」模式可以標記解釋。",
-                4000,
-            )
-            return
-
-        if not self.editor.has_selection():
-            self.status.showMessage(
-                "請先反白選取一段解釋文字。",
                 4000,
             )
             return
@@ -636,21 +631,16 @@ class MainWindow(QMainWindow):
             )
             return
 
-        explanation_start, explanation_end = (
-            self.editor.storage_selection()
+        current = ann.explanation_text
+        if not current and ann.explanation_start is not None and ann.explanation_end is not None:
+            current = self.doc.text[ann.explanation_start:ann.explanation_end]
+        explanation, accepted = QInputDialog.getMultiLineText(
+            self, "編輯解釋", f"輸入「{self.doc.text[ann.start:ann.end]}」的解釋：", current
         )
-
-        # 解釋屬於文件概念：同一 concept_id 的所有術語標註一起更新。
-        # 例如任一筆「意定之債」指定新解釋後，全文其他「意定之債」
-        # 也會指向同一段解釋。
-        linked_annotations = [
-            item
-            for item in self.doc.annotations
-            if item.concept_id == ann.concept_id
-        ]
-        for item in linked_annotations:
-            item.explanation_start = explanation_start
-            item.explanation_end = explanation_end
+        if not accepted:
+            return
+        ann.explanation_text = explanation.strip()
+        ann.explanation_start = ann.explanation_end = None
 
         self.doc.dirty = True
         self.editor.set_active_annotation(ann.id)
@@ -665,8 +655,7 @@ class MainWindow(QMainWindow):
 
         self.status.showMessage(
             f"已將反白文字設為「{term_text}」"
-            f"（概念：{concept_name}）的解釋，"
-            f"共更新 {len(linked_annotations)} 筆相同概念標註。",
+            f"（概念：{concept_name}）的解釋。",
             6000,
         )
 
@@ -1516,6 +1505,50 @@ class MainWindow(QMainWindow):
         # 將該筆標註設為目前操作中的標註。
         self._on_annotation_clicked(ann.id)
 
+    def _on_concept_action(self, concept_id: str, action: str):
+        if self.doc is None or concept_id not in self.doc.concepts:
+            return
+        name = self.doc.concepts[concept_id]
+        if action == "delete":
+            answer = QMessageBox.question(self, "刪除概念", f"確定刪除「{name}」？相關術語會保留，但取消概念連結。")
+            if answer != QMessageBox.Yes:
+                return
+            for ann in self.doc.annotations:
+                if ann.concept_id == concept_id:
+                    ann.concept_id = None
+                if ann.broader_concept_id == concept_id:
+                    ann.broader_concept_id = None
+            del self.doc.concepts[concept_id]
+            self.doc.dirty = True
+            self.concept_panel.refresh(self.doc)
+            self.editor.refresh_highlights()
+            self._refresh_status(); self._update_window_title()
+            return
+        updated, ok = QInputDialog.getText(self, "編輯概念", "概念名稱：", text=name)
+        if not ok or not updated.strip():
+            return
+        self.doc.concepts[concept_id] = updated.strip()
+        linked = [a for a in self.doc.annotations if a.concept_id == concept_id]
+        if linked:
+            current_parent = next((a.broader_concept_id for a in linked if a.broader_concept_id), None)
+            options = ["（最上層：概念指向自己）"] + [n for cid, n in self.doc.concepts.items() if cid != concept_id]
+            default = self.doc.concepts.get(current_parent, options[0])
+            parent_name, accepted = QInputDialog.getItem(self, "編輯上位概念", "上位概念：", options, max(0, options.index(default) if default in options else 0), True)
+            if accepted:
+                parent_id = concept_id if parent_name == options[0] else next((cid for cid, n in self.doc.concepts.items() if n == parent_name), None)
+                if parent_id:
+                    for ann in linked: ann.broader_concept_id = parent_id
+            ann = linked[0]
+            current_explanation = ann.explanation_text or (self.doc.text[ann.explanation_start:ann.explanation_end] if ann.explanation_start is not None and ann.explanation_end is not None else "")
+            explanation, accepted = QInputDialog.getMultiLineText(self, "編輯解釋", f"編輯「{self.doc.text[ann.start:ann.end]}」這筆標註的解釋：", current_explanation)
+            if accepted:
+                ann.explanation_text = explanation.strip()
+                ann.explanation_start = ann.explanation_end = None
+        self.doc.dirty = True
+        self.concept_panel.refresh(self.doc)
+        self.editor.refresh_highlights()
+        self._refresh_status(); self._update_window_title()
+
     def _on_annotation_clicked(self, ann_id: str):
         if self.doc is None:
             return
@@ -1574,7 +1607,7 @@ class MainWindow(QMainWindow):
                     explanation_text[:47] + "…"
                 )
         else:
-            explanation_text = "尚未標記"
+            explanation_text = ann.explanation_text or "尚未標記"
 
         self.status.showMessage(
             f"術語：{term_text}　｜　"
