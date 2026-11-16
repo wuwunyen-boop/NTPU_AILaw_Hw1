@@ -17,7 +17,7 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
-from PySide6.QtCore import QEvent, Qt, QPoint, Signal
+from PySide6.QtCore import QEvent, Qt, QPoint, Signal, QTimer
 from PySide6.QtGui import (
     QAction, QColor, QGuiApplication, QKeySequence, QShortcut, QTextCharFormat,
     QTextCursor, QFont, QPalette,
@@ -137,6 +137,15 @@ class AnnotationEditor(QTextEdit):
             Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
         )
         self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
+        self.viewport().installEventFilter(self)
+        self._hover_tooltip_text = ""
+        self._hover_tooltip_pos = QPoint()
+        self._hover_tooltip_timer = QTimer(self)
+        self._hover_tooltip_timer.setSingleShot(True)
+        self._hover_tooltip_timer.timeout.connect(
+            self._show_hover_tooltip
+        )
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._on_context_menu)
         self.selectionChanged.connect(self._on_selection_changed)
@@ -221,6 +230,9 @@ class AnnotationEditor(QTextEdit):
     # --------------------------------------------------- mouse drag detection
 
     def mousePressEvent(self, ev):
+        self._hover_tooltip_timer.stop()
+        self._hover_tooltip_text = ""
+        QToolTip.hideText()
         if ev.button() == Qt.LeftButton:
             self._left_drag_active = True
         super().mousePressEvent(ev)
@@ -258,6 +270,93 @@ class AnnotationEditor(QTextEdit):
 
     # ------------------------------------------------------ highlight render
     # 滑鼠停在解釋範圍時，顯示該解釋所屬的概念。
+    def eventFilter(self, watched, event):
+        if (
+            watched is self.viewport()
+            and event.type() == QEvent.MouseMove
+            and self._doc is not None
+            and self._omap is not None
+        ):
+            if event.buttons() & Qt.LeftButton:
+                self._hover_tooltip_timer.stop()
+                self._hover_tooltip_text = ""
+                QToolTip.hideText()
+            else:
+                cursor = self.cursorForPosition(event.pos())
+                storage_pos = self._omap.to_storage(
+                    cursor.position()
+                )
+                annotations = self._doc.annotations_at(
+                    storage_pos
+                )
+                tooltip = self._annotation_hover_tooltip(
+                    annotations
+                )
+                if tooltip:
+                    self._hover_tooltip_pos = (
+                        event.globalPosition().toPoint()
+                    )
+                    if tooltip != self._hover_tooltip_text:
+                        self._hover_tooltip_text = tooltip
+                        self._hover_tooltip_timer.start(550)
+                else:
+                    self._hover_tooltip_timer.stop()
+                    self._hover_tooltip_text = ""
+                    QToolTip.hideText()
+
+        return super().eventFilter(watched, event)
+
+    def _annotation_hover_tooltip(self, annotations) -> str:
+        if not annotations or self._doc is None:
+            return ""
+
+        blocks: list[str] = []
+        for ann in annotations:
+            term_text = self._doc.text[ann.start:ann.end]
+            concept_name = (
+                self._doc.concepts.get(ann.concept_id, ann.concept_id)
+                if ann.concept_id is not None
+                else "尚未指定概念"
+            )
+            broader_names = [
+                self._doc.concepts.get(parent_id, parent_id)
+                for parent_id in ann.get_broader_concept_ids()
+            ]
+            explanation_text = ann.explanation_text.strip()
+            if (
+                not explanation_text
+                and ann.explanation_start is not None
+                and ann.explanation_end is not None
+                and 0 <= ann.explanation_start < ann.explanation_end
+                <= len(self._doc.text)
+            ):
+                explanation_text = self._doc.text[
+                    ann.explanation_start:ann.explanation_end
+                ]
+            explanation_text = (
+                " ".join(explanation_text.split())
+                if explanation_text
+                else "尚未設定"
+            )
+            if len(explanation_text) > 160:
+                explanation_text = explanation_text[:157] + "…"
+
+            blocks.append(
+                f"術語：{term_text}\n"
+                f"概念：{concept_name}\n"
+                f"上位概念：{'、'.join(broader_names) or '尚未設定'}\n"
+                f"解釋：{explanation_text}"
+            )
+        return "\n\n".join(dict.fromkeys(blocks))
+
+    def _show_hover_tooltip(self):
+        if self._hover_tooltip_text:
+            QToolTip.showText(
+                self._hover_tooltip_pos,
+                self._hover_tooltip_text,
+                self.viewport(),
+            )
+
     def viewportEvent(self, event):
         if (
             event.type() == QEvent.ToolTip
@@ -574,6 +673,43 @@ class AnnotationEditor(QTextEdit):
                 alpha=bg_alpha,
             )
 
+        if self._mode.id == "term_definition" and self._doc is not None:
+            concept_name = (
+                self._doc.concepts.get(ann.concept_id, ann.concept_id)
+                if ann.concept_id is not None
+                else "尚未指定概念"
+            )
+            broader_names = [
+                self._doc.concepts.get(parent_id, parent_id)
+                for parent_id in ann.get_broader_concept_ids()
+            ]
+            explanation_text = ann.explanation_text.strip()
+            if (
+                not explanation_text
+                and ann.explanation_start is not None
+                and ann.explanation_end is not None
+                and 0 <= ann.explanation_start < ann.explanation_end
+                <= len(self._doc.text)
+            ):
+                explanation_text = self._doc.text[
+                    ann.explanation_start:ann.explanation_end
+                ]
+            explanation_text = (
+                explanation_text.replace("\r", " ")
+                .replace("\n", " ")
+                .strip()
+                if explanation_text
+                else "尚未設定"
+            )
+            if len(explanation_text) > 80:
+                explanation_text = explanation_text[:77] + "…"
+
+            tooltip_parts.extend([
+                f"概念：{concept_name}",
+                "上位概念：" + ("、".join(broader_names) or "尚未設定"),
+                f"解釋：{explanation_text}",
+            ])
+
         if bg_color is None:
             # 無主背景色時：淡黃後備，深色模式提高 alpha 讓 span 仍可辨識。
             bg_color = _hex_to_qcolor("#FFF59D", alpha=fallback_alpha)
@@ -587,7 +723,7 @@ class AnnotationEditor(QTextEdit):
             if underline_color is not None:
                 fmt.setUnderlineColor(underline_color)
         if tooltip_parts:
-            fmt.setToolTip("　|　".join(tooltip_parts))
+            fmt.setToolTip("\n".join(tooltip_parts))
 
     # ----------------------------------------------------------- context menu
 
