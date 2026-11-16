@@ -355,15 +355,20 @@ class AnnotationEditor(QTextEdit):
                         else "尚未設定"
                     )
 
+                    explanation_text = ann.explanation_text.strip()
                     if (
-                        ann.explanation_start is not None
+                        not explanation_text
+                        and ann.explanation_start is not None
                         and ann.explanation_end is not None
+                        and 0 <= ann.explanation_start < ann.explanation_end
+                        <= len(self._doc.text)
                     ):
                         explanation_text = self._doc.text[
                             ann.explanation_start:
                             ann.explanation_end
                         ]
 
+                    if explanation_text:
                         explanation_text = (
                             explanation_text
                             .replace("\r", " ")
