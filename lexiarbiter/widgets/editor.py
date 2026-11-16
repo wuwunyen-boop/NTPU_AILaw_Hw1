@@ -298,15 +298,15 @@ class AnnotationEditor(QTextEdit):
                 else:
                     concept_name = "尚未指定概念"
 
-                if ann.broader_concept_id is not None:
-                    broader_name = (
-                        self._doc.concepts.get(
-                            ann.broader_concept_id,
-                            ann.broader_concept_id,
-                        )
-                    )
-                else:
-                    broader_name = "尚未設定"
+                broader_names = [
+                    self._doc.concepts.get(parent_id, parent_id)
+                    for parent_id in ann.get_broader_concept_ids()
+                ]
+                broader_name = (
+                    "、".join(broader_names)
+                    if broader_names
+                    else "尚未設定"
+                )
 
                 if ann.id == self._active_annotation_id:
                     selected_text = "目前選取：是"
@@ -345,15 +345,15 @@ class AnnotationEditor(QTextEdit):
                         concept_name = "尚未指定概念"
 
 
-                    if ann.broader_concept_id is not None:
-                        broader_name = (
-                            self._doc.concepts.get(
-                                ann.broader_concept_id,
-                                ann.broader_concept_id,
-                            )
-                        )
-                    else:
-                        broader_name = "尚未設定"
+                    broader_names = [
+                        self._doc.concepts.get(parent_id, parent_id)
+                        for parent_id in ann.get_broader_concept_ids()
+                    ]
+                    broader_name = (
+                        "、".join(broader_names)
+                        if broader_names
+                        else "尚未設定"
+                    )
 
                     if (
                         ann.explanation_start is not None

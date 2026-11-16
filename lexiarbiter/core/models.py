@@ -26,6 +26,31 @@ class Annotation:
     explanation_end: Optional[int] = None
     broader_concept_id: Optional[str] = None
     explanation_text: str = ""
+    broader_concept_ids: list[str] = field(default_factory=list)
+
+    def __post_init__(self):
+        # 舊版 .lexa 只有單一 broader_concept_id；載入時自動升級成清單。
+        if self.broader_concept_ids:
+            self.set_broader_concept_ids(self.broader_concept_ids)
+        elif self.broader_concept_id:
+            self.broader_concept_ids = [self.broader_concept_id]
+
+    def set_broader_concept_ids(self, concept_ids: list[str]) -> None:
+        """設定多個上位概念，並同步維持舊版單一欄位的相容性。"""
+        self.broader_concept_ids = list(dict.fromkeys(
+            concept_id for concept_id in concept_ids if concept_id
+        ))
+        self.broader_concept_id = (
+            self.broader_concept_ids[0]
+            if self.broader_concept_ids
+            else None
+        )
+
+    def get_broader_concept_ids(self) -> list[str]:
+        """回傳上位概念清單，並相容執行期間仍設定舊欄位的程式碼。"""
+        if self.broader_concept_ids:
+            return list(self.broader_concept_ids)
+        return [self.broader_concept_id] if self.broader_concept_id else []
 
     def overlaps(self, other: "Annotation") -> bool:
         return not (self.end <= other.start or other.end <= self.start)
@@ -34,7 +59,12 @@ class Annotation:
         return self.start <= pos < self.end
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        data = asdict(self)
+        broader_ids = self.get_broader_concept_ids()
+        data["broader_concept_ids"] = broader_ids
+        # 舊版工具仍可讀到第一個上位概念。
+        data["broader_concept_id"] = broader_ids[0] if broader_ids else None
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "Annotation":
@@ -47,8 +77,29 @@ class Annotation:
             concept_id=data.get("concept_id"),  # 讀取概念 ID
             explanation_start=data.get("explanation_start"),
             explanation_end=data.get("explanation_end"),
-            broader_concept_id=data.get("broader_concept_id"),
+            broader_concept_id=(
+                (
+                    data.get("broader_concept_ids")[0]
+                    if isinstance(data.get("broader_concept_ids"), list)
+                    and data.get("broader_concept_ids")
+                    else data.get("broader_concept_ids")
+                    if isinstance(data.get("broader_concept_ids"), str)
+                    else None
+                )
+                if "broader_concept_ids" in data
+                else data.get("broader_concept_id")
+            ),
             explanation_text=data.get("explanation_text", ""),
+            broader_concept_ids=(
+                (
+                    [data.get("broader_concept_ids")]
+                    if isinstance(data.get("broader_concept_ids"), str)
+                    else list(data.get("broader_concept_ids") or [])
+                )
+                if "broader_concept_ids" in data
+                else ([data["broader_concept_id"]]
+                      if data.get("broader_concept_id") else [])
+            ),
         )
 
 

@@ -1,8 +1,11 @@
 """LexiArbiter entry point."""
 
 import logging
+import argparse
 import sys
+from pathlib import Path
 
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -19,12 +22,24 @@ from lexiarbiter.core.logger import (
 
 
 def main():
+    parser = argparse.ArgumentParser(description="LexiArbiter 法律文件標註工具")
+    parser.add_argument(
+        "judgment",
+        nargs="?",
+        help="啟動後自動開啟的判決檔（JSON、DOCX、LEXA 或 TXT）",
+    )
+    parser.add_argument(
+        "--mode",
+        help="啟動時使用的標註模式 ID（例如 judgment_reasoning）",
+    )
+    args = parser.parse_args(sys.argv[1:])
+
     # 最優先初始化 logging，確保後續任何錯誤都能被記錄
     setup_logging()
     log_environment(__version__)
     log = logging.getLogger(__name__)
 
-    app = QApplication(sys.argv)
+    app = QApplication([sys.argv[0]])
     app.setApplicationName("LexiArbiter")
     app.setOrganizationName("LexiArbiter")
 
@@ -52,9 +67,26 @@ def main():
         )
 
     win = MainWindow()
+    if args.mode:
+        for action in win.mode_action_group.actions():
+            action.setChecked(action.data() == args.mode)
+        win._switch_mode(args.mode, persist=False)
+
     # 安裝 crash hook，未捕獲例外時先緊急存檔再寫 log
     install_exception_hook(win.emergency_save)
     win.show()
+
+    if args.judgment:
+        judgment_path = Path(args.judgment).expanduser().resolve()
+        if judgment_path.is_file():
+            # 等主視窗完成顯示後再載入，讓啟動檔可直接帶入判決檔。
+            QTimer.singleShot(0, lambda: win.load_file(str(judgment_path)))
+        else:
+            QMessageBox.warning(
+                win,
+                "找不到判決檔",
+                f"啟動時指定的檔案不存在：\n{judgment_path}",
+            )
 
     try:
         sys.exit(app.exec())

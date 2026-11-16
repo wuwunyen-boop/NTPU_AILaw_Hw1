@@ -92,15 +92,25 @@ class ConceptSelectionDialog(QDialog):
     def _build_concept_tree(
         self,
         concepts: dict[str, str],
-        broader_by_concept: dict[str, str],
+        broader_by_concept: dict[str, str | list[str]],
     ):
-        """依 concept -> broader concept 關係建立可展開的概念樹。"""
+        """依 concept -> broader concepts 關係建立可展開的概念樹。"""
+        all_parents: dict[str, list[str]] = {}
+        for child_id, raw_parent_ids in broader_by_concept.items():
+            if isinstance(raw_parent_ids, str):
+                raw_parent_ids = [raw_parent_ids]
+            parent_ids = [
+                parent_id
+                for parent_id in raw_parent_ids
+                if parent_id in concepts and parent_id != child_id
+            ]
+            if child_id in concepts and parent_ids:
+                all_parents[child_id] = list(dict.fromkeys(parent_ids))
+
+        # 選目標概念時以第一個上位概念呈現階層；完整的上位概念集合仍會顯示在提示文字。
         parent_by_child = {
-            child_id: broader_id
-            for child_id, broader_id in broader_by_concept.items()
-            if child_id in concepts
-            and broader_id in concepts
-            and child_id != broader_id
+            child_id: parent_ids[0]
+            for child_id, parent_ids in all_parents.items()
         }
 
         # 防止舊資料中的循環關係讓概念完全無法顯示；遇到循環時，
@@ -135,13 +145,15 @@ class ConceptSelectionDialog(QDialog):
             )
             item.setCheckState(0, Qt.Unchecked)
 
-            parent_id = parent_by_child.get(concept_id)
-            if parent_id is None:
+            parent_ids = all_parents.get(concept_id, [])
+            if not parent_ids:
                 item.setToolTip(0, "最上層概念")
             else:
                 item.setToolTip(
                     0,
-                    f"上位概念：{concepts[parent_id]}",
+                    "上位概念：" + "、".join(
+                        concepts[parent_id] for parent_id in parent_ids
+                    ),
                 )
 
             if parent_item is None:
@@ -258,6 +270,121 @@ class ConceptSelectionDialog(QDialog):
         return None, text
 
 
+class BroaderConceptSelectionDialog(QDialog):
+    """以勾選清單設定多個上位概念，並可逐項或一次取消選取。"""
+
+    def __init__(
+        self,
+        concepts: dict[str, str],
+        selected_ids: list[str] | None = None,
+        parent=None,
+        exclusive_id: str | None = None,
+        broader_by_concept: dict[str, str | list[str]] | None = None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("選擇上位概念")
+        self.resize(440, 520)
+        self._exclusive_id = exclusive_id
+        self._selected_ids = set(selected_ids or [])
+        if exclusive_id in self._selected_ids:
+            self._selected_ids = {exclusive_id}
+        self._updating_items = False
+        self._broader_map = broader_by_concept or {}
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "勾選一個或多個上位概念；點「清除全部」可取消所有選取。"
+        ))
+
+        self.list_widget = QListWidget()
+        self._items: dict[str, QListWidgetItem] = {}
+        for concept_id, name in sorted(
+            concepts.items(), key=lambda item: item[1]
+        ):
+            item = QListWidgetItem(name)
+            item.setData(Qt.UserRole, concept_id)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.Checked if concept_id in self._selected_ids
+                else Qt.Unchecked
+            )
+            parents = self._normalise_parent_ids(
+                self._broader_map.get(concept_id)
+            )
+            if parents:
+                names = [concepts.get(pid, pid) for pid in parents]
+                item.setToolTip("目前上位概念：" + "、".join(names))
+            else:
+                item.setToolTip("目前未設定上位概念")
+            self.list_widget.addItem(item)
+            self._items[concept_id] = item
+        self.list_widget.itemChanged.connect(self._on_item_changed)
+        layout.addWidget(self.list_widget, 1)
+
+        selection_buttons = QHBoxLayout()
+        self.clear_button = QPushButton("清除勾選")
+        self.clear_button.clicked.connect(self.clear_selection)
+        selection_buttons.addWidget(self.clear_button)
+        selection_buttons.addStretch()
+        layout.addLayout(selection_buttons)
+
+        layout.addWidget(QLabel("也可以輸入一個新的上位概念："))
+        self.input_edit = QLineEdit()
+        self.input_edit.setPlaceholderText("輸入新上位概念名稱（可留空）")
+        layout.addWidget(self.input_edit)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+        self.btn_ok = QPushButton("確定")
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel.clicked.connect(self.reject)
+        button_row.addWidget(self.btn_ok)
+        button_row.addWidget(self.btn_cancel)
+        layout.addLayout(button_row)
+
+    @staticmethod
+    def _normalise_parent_ids(value) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value] if value else []
+        return [concept_id for concept_id in value if concept_id]
+
+    def _on_item_changed(self, item: QListWidgetItem):
+        if self._updating_items:
+            return
+        concept_id = item.data(Qt.UserRole)
+        if item.checkState() == Qt.Checked:
+            if self._exclusive_id == concept_id:
+                self._updating_items = True
+                for other_id, other in self._items.items():
+                    if other_id != concept_id:
+                        other.setCheckState(Qt.Unchecked)
+                self._updating_items = False
+            elif self._exclusive_id in self._items:
+                self._updating_items = True
+                self._items[self._exclusive_id].setCheckState(Qt.Unchecked)
+                self._updating_items = False
+
+    def clear_selection(self):
+        self._updating_items = True
+        try:
+            for item in self._items.values():
+                item.setCheckState(Qt.Unchecked)
+        finally:
+            self._updating_items = False
+
+    def get_result(self) -> tuple[list[str], str | None]:
+        selected_ids = [
+            concept_id
+            for concept_id, item in self._items.items()
+            if item.checkState() == Qt.Checked
+        ]
+        new_name = self.input_edit.text().strip() or None
+        return selected_ids, new_name
+
+
 class ConceptSidebar(QWidget):
     """側邊欄：顯示當前文件所有的概念池"""
     concept_clicked = Signal(str)
@@ -272,9 +399,24 @@ class ConceptSidebar(QWidget):
         f = title.font()
         f.setBold(True)
         title.setFont(f)
+
+        tree_controls = QHBoxLayout()
+        self.expand_all_button = QPushButton("展開全部")
+        self.expand_all_button.clicked.connect(
+            lambda: self.list_widget.expandAll()
+        )
+        self.collapse_all_button = QPushButton("收合全部")
+        self.collapse_all_button.clicked.connect(
+            lambda: self.list_widget.collapseAll()
+        )
+        tree_controls.addWidget(self.expand_all_button)
+        tree_controls.addWidget(self.collapse_all_button)
+        tree_controls.addStretch()
         
         self.list_widget = QTreeWidget()
         self.list_widget.setHeaderHidden(True)
+        self.list_widget.setIndentation(20)
+        self.list_widget.setItemsExpandable(True)
         self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
         self.list_widget.customContextMenuRequested.connect(self._show_menu)
         self.list_widget.itemClicked.connect(
@@ -282,34 +424,69 @@ class ConceptSidebar(QWidget):
         )
         
         layout.addWidget(title)
+        layout.addLayout(tree_controls)
         layout.addWidget(self.list_widget)
 
     def refresh(self, doc):
         self.list_widget.clear()
         if not doc or not hasattr(doc, 'concepts'):
             return
-        parent_by_child = {}
+        parent_by_child: dict[str, list[str]] = {}
         for ann in doc.annotations:
-            if ann.concept_id in doc.concepts and ann.broader_concept_id in doc.concepts and ann.concept_id != ann.broader_concept_id:
-                parent_by_child.setdefault(ann.concept_id, ann.broader_concept_id)
-        for child in list(parent_by_child):
-            seen, current = {child}, parent_by_child.get(child)
-            while current in parent_by_child:
-                if current in seen:
-                    parent_by_child.pop(child, None)
-                    break
-                seen.add(current); current = parent_by_child[current]
-        by_parent = {}
-        for child, parent in parent_by_child.items(): by_parent.setdefault(parent, []).append(child)
-        def add(cid, parent_item=None):
+            if ann.concept_id not in doc.concepts:
+                continue
+            parents = parent_by_child.setdefault(ann.concept_id, [])
+            for parent_id in ann.get_broader_concept_ids():
+                if (
+                    parent_id in doc.concepts
+                    and parent_id != ann.concept_id
+                    and parent_id not in parents
+                ):
+                    parents.append(parent_id)
+
+        by_parent: dict[str, list[str]] = {}
+        for child_id, parent_ids in parent_by_child.items():
+            for parent_id in parent_ids:
+                by_parent.setdefault(parent_id, []).append(child_id)
+
+        reachable: set[str] = set()
+
+        def add(cid, parent_item=None, ancestors=frozenset()):
             item = QTreeWidgetItem([doc.concepts[cid]])
             item.setData(0, Qt.UserRole, cid)
+            parent_names = [
+                doc.concepts[parent_id]
+                for parent_id in parent_by_child.get(cid, [])
+            ]
+            item.setToolTip(
+                0,
+                "上位概念：" + "、".join(parent_names)
+                if parent_names else "最上層概念",
+            )
             (parent_item.addChild(item) if parent_item else self.list_widget.addTopLevelItem(item))
-            for child in sorted(by_parent.get(cid, []), key=lambda x: doc.concepts[x]): add(child, item)
-        roots = [cid for cid in doc.concepts if cid not in parent_by_child]
-        for cid in sorted(roots, key=lambda x: doc.concepts[x]): add(cid)
+            reachable.add(cid)
+            next_ancestors = ancestors | {cid}
+            for child in sorted(by_parent.get(cid, []), key=lambda x: doc.concepts[x]):
+                if child not in next_ancestors:
+                    add(child, item, next_ancestors)
 
-    def _on_item_clicked(self, item: QListWidgetItem):
+        roots = [
+            cid for cid in doc.concepts
+            if not parent_by_child.get(cid)
+        ]
+        for cid in sorted(roots, key=lambda x: doc.concepts[x]):
+            add(cid)
+
+        # 舊檔可能有循環關係，讓尚未顯示的概念仍以根節點出現。
+        for cid in sorted(
+            (concept_id for concept_id in doc.concepts if concept_id not in reachable),
+            key=lambda x: doc.concepts[x],
+        ):
+            add(cid)
+
+        self.list_widget.expandAll()
+
+    def _on_item_clicked(self, item: QTreeWidgetItem, _column: int):
         concept_id = item.data(0, Qt.UserRole)
 
         if concept_id:

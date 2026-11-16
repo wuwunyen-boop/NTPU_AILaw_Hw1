@@ -34,7 +34,11 @@ from .core.logger import current_log_dir
 from .core.models import Annotation, Document, detect_same_group_conflicts
 from .widgets.editor import AnnotationEditor
 from .widgets.file_panel import FilePanel
-from .widgets.concept_panel import ConceptSelectionDialog, ConceptSidebar
+from .widgets.concept_panel import (
+    BroaderConceptSelectionDialog,
+    ConceptSelectionDialog,
+    ConceptSidebar,
+)
 
 
 # Autosave cadence. 60s is a good compromise — short enough that worst-case
@@ -572,6 +576,7 @@ class MainWindow(QMainWindow):
                 # 自動複製的相同術語只建立標註與概念連結；解釋只屬於
                 # 使用者目前選取並編輯的那一筆，不將詞面文字假裝成解釋。
                 broader_concept_id=source_ann.broader_concept_id,
+                broader_concept_ids=source_ann.get_broader_concept_ids(),
             )
 
             self.doc.add_annotation(auto_ann)
@@ -661,21 +666,45 @@ class MainWindow(QMainWindow):
 
     # 設定某個概念所屬的上位概念，
     # 並同步更新所有使用該概念的術語標註。
-    def _concept_broader_map(self) -> dict[str, str]:
+    def _concept_broader_map(self) -> dict[str, list[str]]:
         """從術語標註整理 concept -> broader concept 的階層關係。"""
         if self.doc is None:
             return {}
-        result: dict[str, str] = {}
+        result: dict[str, list[str]] = {}
         for ann in self.doc.annotations:
-            if (
-                ann.concept_id in self.doc.concepts
-                and ann.broader_concept_id in self.doc.concepts
-            ):
-                result.setdefault(
-                    ann.concept_id,
-                    ann.broader_concept_id,
-                )
+            if ann.concept_id not in self.doc.concepts:
+                continue
+            for broader_id in ann.get_broader_concept_ids():
+                if broader_id not in self.doc.concepts:
+                    continue
+                parents = result.setdefault(ann.concept_id, [])
+                if broader_id not in parents:
+                    parents.append(broader_id)
         return result
+
+    def _broader_choice_would_cycle(
+        self,
+        target_id: str,
+        broader_ids: list[str],
+    ) -> bool:
+        """確認新增的上位概念關係不會形成循環。"""
+        if target_id in broader_ids:
+            return len(broader_ids) != 1
+
+        parent_map = self._concept_broader_map()
+        parent_map[target_id] = broader_ids
+        for broader_id in broader_ids:
+            pending = [broader_id]
+            seen: set[str] = set()
+            while pending:
+                current = pending.pop()
+                if current == target_id:
+                    return True
+                if current in seen:
+                    continue
+                seen.add(current)
+                pending.extend(parent_map.get(current, []))
+        return False
 
     def set_broader_concept(self):
         if self.doc is None:
@@ -728,45 +757,48 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # 所有概念都可以成為上位概念。
-        # 最上層概念依作業格式，以自己作為 broader concept。
-        broader_candidates = dict(
-            self.doc.concepts
+        current_broader_ids = self._concept_broader_map().get(
+            target_id,
+            [],
         )
-
-        # 第二次選擇：上位概念。
-        broader_dialog = ConceptSelectionDialog(
-            broader_candidates,
-            default_text="",
+        broader_dialog = BroaderConceptSelectionDialog(
+            self.doc.concepts,
+            selected_ids=current_broader_ids,
             parent=self,
+            exclusive_id=target_id,
             broader_by_concept=self._concept_broader_map(),
         )
         broader_dialog.setWindowTitle(
-            "步驟 2：選擇它的上位概念"
-        )
-        broader_dialog.input_label.setText(
-            "2. 或直接輸入新的上位概念："
-        )
-        broader_dialog.input_edit.setPlaceholderText(
-            "輸入新的上位概念名稱..."
+            "步驟 2：選擇一個或多個上位概念"
         )
 
         if not broader_dialog.exec():
             return
 
-        broader_id, broader_new_name = (
-            broader_dialog.get_result()
-        )
-
+        broader_ids, broader_new_name = broader_dialog.get_result()
+        new_id = None
         if broader_new_name:
-            broader_id = "C_" + uuid.uuid4().hex[:8]
-            self.doc.concepts[broader_id] = broader_new_name
-            self.concept_panel.refresh(self.doc)
-        elif broader_id is None:
-            QMessageBox.information(
+            existing_id = next(
+                (
+                    concept_id
+                    for concept_id, name in self.doc.concepts.items()
+                    if name == broader_new_name
+                ),
+                None,
+            )
+            if existing_id:
+                if existing_id not in broader_ids:
+                    broader_ids.append(existing_id)
+            else:
+                new_id = "C_" + uuid.uuid4().hex[:8]
+                broader_ids.append(new_id)
+
+        if self._broader_choice_would_cycle(target_id, broader_ids):
+            QMessageBox.warning(
                 self,
-                "請選擇既有概念",
-                "請從上方清單選擇上位概念，或輸入新的上位概念。",
+                "上位概念形成循環",
+                "這些選擇會形成概念循環，請調整上位概念。\n"
+                "若要將此概念設為最上層，請只選它自己。",
             )
             return
 
@@ -785,9 +817,13 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # 將所有相同概念的術語設成同一個上位概念。
+        if broader_new_name and new_id is not None:
+            self.doc.concepts[new_id] = broader_new_name
+            self.concept_panel.refresh(self.doc)
+
+        # 將所有相同概念的術語設成相同的上位概念集合。
         for ann in linked_annotations:
-            ann.broader_concept_id = broader_id
+            ann.set_broader_concept_ids(broader_ids)
 
         self.doc.dirty = True
         self._refresh_status()
@@ -797,14 +833,13 @@ class MainWindow(QMainWindow):
             target_id,
             target_id,
         )
-        broader_name = self.doc.concepts.get(
-            broader_id,
-            broader_id,
-        )
-
+        broader_names = [
+            self.doc.concepts.get(concept_id, concept_id)
+            for concept_id in broader_ids
+        ]
+        result_text = "、".join(broader_names) if broader_names else "未設定"
         self.status.showMessage(
-            f"已將「{target_name}」的上位概念"
-            f"設定為「{broader_name}」，"
+            f"已將「{target_name}」的上位概念設定為「{result_text}」，"
             f"共更新 {len(linked_annotations)} 個術語標註。",
             7000,
         )
@@ -1516,8 +1551,11 @@ class MainWindow(QMainWindow):
             for ann in self.doc.annotations:
                 if ann.concept_id == concept_id:
                     ann.concept_id = None
-                if ann.broader_concept_id == concept_id:
-                    ann.broader_concept_id = None
+                ann.set_broader_concept_ids([
+                    parent_id
+                    for parent_id in ann.get_broader_concept_ids()
+                    if parent_id != concept_id
+                ])
             del self.doc.concepts[concept_id]
             self.doc.dirty = True
             self.concept_panel.refresh(self.doc)
@@ -1530,14 +1568,50 @@ class MainWindow(QMainWindow):
         self.doc.concepts[concept_id] = updated.strip()
         linked = [a for a in self.doc.annotations if a.concept_id == concept_id]
         if linked:
-            current_parent = next((a.broader_concept_id for a in linked if a.broader_concept_id), None)
-            options = ["（最上層：概念指向自己）"] + [n for cid, n in self.doc.concepts.items() if cid != concept_id]
-            default = self.doc.concepts.get(current_parent, options[0])
-            parent_name, accepted = QInputDialog.getItem(self, "編輯上位概念", "上位概念：", options, max(0, options.index(default) if default in options else 0), True)
-            if accepted:
-                parent_id = concept_id if parent_name == options[0] else next((cid for cid, n in self.doc.concepts.items() if n == parent_name), None)
-                if parent_id:
-                    for ann in linked: ann.broader_concept_id = parent_id
+            current_parents = self._concept_broader_map().get(
+                concept_id,
+                [],
+            )
+            broader_dialog = BroaderConceptSelectionDialog(
+                self.doc.concepts,
+                selected_ids=current_parents,
+                parent=self,
+                exclusive_id=concept_id,
+                broader_by_concept=self._concept_broader_map(),
+            )
+            broader_dialog.setWindowTitle("編輯上位概念")
+            if broader_dialog.exec():
+                parent_ids, new_parent_name = broader_dialog.get_result()
+                new_parent_id = None
+                new_parent_to_add = None
+                if new_parent_name:
+                    new_parent_id = next(
+                        (
+                            cid for cid, concept_name
+                            in self.doc.concepts.items()
+                            if concept_name == new_parent_name
+                        ),
+                        None,
+                    )
+                    if new_parent_id is None:
+                        new_parent_id = "C_" + uuid.uuid4().hex[:8]
+                        new_parent_to_add = new_parent_name
+                    if new_parent_id not in parent_ids:
+                        parent_ids.append(new_parent_id)
+                if self._broader_choice_would_cycle(
+                    concept_id,
+                    parent_ids,
+                ):
+                    QMessageBox.warning(
+                        self,
+                        "上位概念形成循環",
+                        "這些選擇會形成概念循環，請重新設定。",
+                    )
+                else:
+                    if new_parent_to_add is not None:
+                        self.doc.concepts[new_parent_id] = new_parent_to_add
+                    for ann in linked:
+                        ann.set_broader_concept_ids(parent_ids)
             ann = linked[0]
             current_explanation = ann.explanation_text or (self.doc.text[ann.explanation_start:ann.explanation_end] if ann.explanation_start is not None and ann.explanation_end is not None else "")
             explanation, accepted = QInputDialog.getMultiLineText(self, "編輯解釋", f"編輯「{self.doc.text[ann.start:ann.end]}」這筆標註的解釋：", current_explanation)
@@ -1573,13 +1647,11 @@ class MainWindow(QMainWindow):
         else:
             concept_name = "尚未指定概念"
 
-        if ann.broader_concept_id is not None:
-            broader_name = self.doc.concepts.get(
-                ann.broader_concept_id,
-                ann.broader_concept_id,
-            )
-        else:
-            broader_name = "尚未設定"
+        broader_names = [
+            self.doc.concepts.get(parent_id, parent_id)
+            for parent_id in ann.get_broader_concept_ids()
+        ]
+        broader_name = "、".join(broader_names) if broader_names else "尚未設定"
 
         # 取得這一筆術語自己的解釋內容。
         if (
