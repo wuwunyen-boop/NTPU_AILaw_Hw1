@@ -274,7 +274,13 @@ class AnnotationEditor(QTextEdit):
             tooltip_blocks: list[str] = []
 
             # 先檢查滑鼠是否位於某筆術語的解釋範圍。
+            # 若同時停在術語標記上，改由下方術語提示優先顯示解釋內容。
+            hovered_annotations = self._doc.annotations_at(
+                storage_pos
+            )
             for ann in self._doc.annotations:
+                if hovered_annotations:
+                    break
                 start = ann.explanation_start
                 end = ann.explanation_end
 
@@ -325,11 +331,7 @@ class AnnotationEditor(QTextEdit):
 
             # 如果不是解釋範圍，再檢查是否停在黃色術語上。
             if not tooltip_blocks:
-                annotations = self._doc.annotations_at(
-                    storage_pos
-                )
-
-                for ann in annotations:
+                for ann in hovered_annotations:
                     term_text = self._doc.text[
                         ann.start:ann.end
                     ]
